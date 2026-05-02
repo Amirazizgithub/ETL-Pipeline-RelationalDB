@@ -1,0 +1,61 @@
+# =====================================================================
+# cicd-pipelines/.gitlab-ci-update.yml 
+# this pipeline is for updating the image in artifact registry
+# =====================================================================
+
+build-and-push-image:
+  stage: build_production
+  image: gcr.io/google.com/cloudsdktool/cloud-sdk:latest
+  variables:
+    ENVIRONMENT: "production"
+    IMAGE_TAG: "latest"
+    IMAGE_AR_PATH: "${CENTRAL_PROJECT_REGION}-docker.pkg.dev/${CENTRAL_PROJECT_ID}/etl-pipeline-relationaldb-${ENVIRONMENT}/etl-pipeline-relationaldb:${IMAGE_TAG}"
+    DOCKER_HOST: "tcp://docker:2375"
+    DOCKER_TLS_CERTDIR: ""
+  services:
+    - docker:24.0.5-dind
+  
+  before_script:
+    - |
+      if [ -z "$CENTRAL_PROJECT_ID" ] && [ -z "$CENTRAL_SA_KEY" ] && [ -z "$CENTRAL_PROJECT_REGION" ]; then
+        echo "CRITICAL ERROR: One or more required variables (CENTRAL_PROJECT_ID, CENTRAL_SA_KEY, CENTRAL_PROJECT_REGION) are empty."
+        exit 1
+      fi
+    
+    - apt-get update && apt-get install -y docker.io
+    - echo "Authenticating with Google Cloud..."
+    - gcloud auth activate-service-account --key-file="$CENTRAL_SA_KEY"
+    - gcloud config set project "${CENTRAL_PROJECT_ID}"
+    - gcloud auth configure-docker "${CENTRAL_PROJECT_REGION}-docker.pkg.dev" --quiet
+
+  script:
+    - TIMESTAMP=$(date +%Y/%m/%d-%H:%M:%S)
+    - echo "Build process started at ${TIMESTAMP} for ${IMAGE_AR_PATH}"
+    - echo "Attempting to pull existing image for caching..."
+    - docker pull "${IMAGE_AR_PATH}" || true
+    - echo "Building the Docker image..."
+    - |
+      docker build \
+        --cache-from "${IMAGE_AR_PATH}" \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        -t "${IMAGE_AR_PATH}" .
+    
+    - echo "Pushing image to Artifact Registry..."
+    - |
+      if docker push "${IMAGE_AR_PATH}"; then
+        echo "=========================================================="
+        echo "SUCCESS: Production image updated to ${IMAGE_TAG}"
+        echo "=========================================================="
+        FINAL_EXIT_CODE=0
+      else
+        echo "ERROR: Docker push failed. Check network or IAM permissions."
+        FINAL_EXIT_CODE=1
+      fi
+      exit $FINAL_EXIT_CODE
+
+  retry: 1
+  interruptible: false
+  only:
+    - production
+
+  when: manual

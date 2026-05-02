@@ -1,0 +1,77 @@
+# =====================================================================
+# cicd-pipelines/.gitlab-ci-pro.yml 
+# this pipeline is for production environment for client's deployment 
+# =====================================================================
+
+deploy_to_k8s:
+  stage: deploy_production
+  image: gcr.io/google.com/cloudsdktool/cloud-sdk:latest
+
+  variables:
+    ENVIRONMENT: "production"
+    IMAGE_TAG: "latest"
+    IMAGE_AR_PATH: "${CENTRAL_PROJECT_REGION}-docker.pkg.dev/${CENTRAL_PROJECT_ID}/etl-pipeline-relationaldb-${ENVIRONMENT}/etl-pipeline-relationaldb:${IMAGE_TAG}"
+    CLUSTER_NAME: "etl-pipeline-cluster"
+    CLIENT_NUMBER: "${CLIENT_NUMBER}"
+    CLIENT_PROJECT_ID: "${CLIENT_PROJECT_ID}"
+    CLIENT_REGION: "${CLIENT_REGION}"
+    CLIENT_TIMEZONE: "${CLIENT_TIMEZONE}"
+    CRONJOB_TASK_PAYLOAD: "${CRONJOB_TASK_PAYLOAD}"
+    HISTORIC_TASK_PAYLOAD: "${HISTORIC_TASK_PAYLOAD}"
+    SCHEDULAR_FREQ: "${SCHEDULAR_FREQ}"
+  
+  before_script:
+    - apt-get update && apt-get install -y jq gettext-base
+    - gcloud auth activate-service-account --key-file="$CENTRAL_SA_KEY"
+
+  script:
+    - |
+      # 1. Initialize variables
+      STATUS="False"
+      LOG="Starting deployment process..."
+      FINAL_EXIT_CODE=1
+
+      # Allow script to continue on errors so we can catch them
+      set +e
+
+      echo "Configuring GKE access for ${CLIENT_PROJECT_ID}..."
+      gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone "${CLIENT_REGION}" --project "${CLIENT_PROJECT_ID}" > /dev/null 2>&1
+      
+      if [ $? -ne 0 ]; then
+          LOG="Deployment Failed: Could not connect to GKE cluster in project ${CLIENT_PROJECT_ID}."
+      else
+          echo "Generating manifests and applying to cluster..."
+          envsubst < k8s-pipelines/cronjob-data-sync-deploy-service.yml > temp-cronjob.yml
+          envsubst < k8s-pipelines/historic-data-deploy-service.yml > temp-historic.yml
+          
+          # Apply to Kubernetes
+          echo "Applying cronjob manifest..."
+          kubectl apply -f temp-cronjob.yml > /dev/null 2>&1
+          echo "Applying historic manifest..."
+          kubectl apply -f temp-historic.yml > /dev/null 2>&1
+          
+          if [ $? -eq 0 ]; then
+              STATUS="True"
+              LOG="Deployment Successful: ETL Jobs updated for client ${CLIENT_NUMBER}."
+              FINAL_EXIT_CODE=0
+          else
+              LOG="Deployment Failed: Kubernetes rejected the manifest files."
+          fi
+      fi
+
+      # 3. Final Output for GitLab Logs/API
+      echo "=========================================================="
+      echo "STATUS: ${STATUS}"
+      echo "LOG: ${LOG}"
+      echo "=========================================================="
+      
+      # Exit with the actual result so the GitLab UI shows green or red
+      exit $FINAL_EXIT_CODE
+
+  retry: 1  
+  interruptible: false
+  only:
+    - production
+
+  after_script:
+    - rm -f temp-cronjob.yml temp-historic.yml

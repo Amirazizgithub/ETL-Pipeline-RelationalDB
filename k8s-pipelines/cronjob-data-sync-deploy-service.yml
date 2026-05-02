@@ -1,0 +1,80 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etl-pipeline-relationaldb-sync-cronjob-${ENVIRONMENT}
+  labels:
+    app: etl-pipeline-relationaldb-sync-job
+spec:
+  # --- 1. THE SCHEDULE ---
+  # Runs at the start of every hour (00:00, 01:00, etc.)
+  schedule: "${SCHEDULAR_FREQ}"
+  
+  # Prevents a new job from starting if the old one is still running
+  concurrencyPolicy: Forbid
+
+  # Keeps history clean to save on metadata storage
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: etl-pipeline-relationaldb-sync-job
+        spec:
+          serviceAccountName: default
+          # --- 2. COST OPTIMIZATION: USE SPOT PODS ---
+          # This reduces the price per CPU/RAM by up to 91%
+          nodeSelector:
+            cloud.google.com/gke-spot: "true"
+          containers:
+          - name: etl-pipeline-relationaldb-sync-job
+            image: "${IMAGE_AR_PATH}"
+            imagePullPolicy: Always
+            command: ["python", "-m", "routes.run_cron_job"]
+            env:
+              - name: CLIENT_NUMBER
+                value: "${CLIENT_NUMBER}"
+              - name: CLIENT_PROJECT_ID
+                value: "${CLIENT_PROJECT_ID}"
+              - name: CLIENT_REGION
+                value: "${CLIENT_REGION}"
+              - name: CLIENT_TIMEZONE
+                value: "${CLIENT_TIMEZONE}"
+              - name: CRONJOB_TASK_PAYLOAD
+                value: '${CRONJOB_TASK_PAYLOAD}'
+              - name: HISTORIC_TASK_PAYLOAD
+                value: '${HISTORIC_TASK_PAYLOAD}'
+              - name: DATABASE_HOST
+                value: "${DATABASE_HOST}"
+              - name: DATABASE_PORT
+                value: "${DATABASE_PORT}"
+              - name: DATABASE_USERNAME
+                value: "${DATABASE_USERNAME}"
+              - name: DATABASE_PASSWORD
+                value: "${DATABASE_PASSWORD}"
+              - name: DATABASE_NAME
+                value: "${DATABASE_NAME}"
+              - name: ETL_LOG_TABLE
+                value: "${ETL_LOG_TABLE}"
+            
+            # --- 3. RESOURCE RIGHT-SIZING ---
+            resources:
+              requests:
+                # Optimized for Autopilot minimums. 
+                # Adjust these only if your script crashes from Out-Of-Memory (OOM).
+                cpu: "500m"      # 0.5 vCPU
+                memory: "1Gi"    # 1 GB
+              limits:
+                # Allow the pod to burst up to higher specs if the node has space.
+                # You are NOT billed for limits, only for requests.
+                cpu: "2000m"     # Up to 2 vCPUs
+                memory: "4Gi"    # Up to 4 GB
+
+          # --- 4. LIFECYCLE MANAGEMENT ---
+          # Re-run the pod if it crashes, but stop when it succeeds
+          restartPolicy: OnFailure
+          
+          # Gives the job 25 seconds to save data if a Spot node is reclaimed
+          terminationGracePeriodSeconds: 25

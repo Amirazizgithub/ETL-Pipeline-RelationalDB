@@ -1,0 +1,131 @@
+# =====================================================================
+# cicd-pipelines/.gitlab-ci-stag.yml 
+# this pipeline is for staging environment for deployment testing
+# =====================================================================
+
+variables:
+  ENVIRONMENT: "staging"
+  IMAGE_TAG: "latest"
+  IMAGE_AR_PATH: "${CENTRAL_PROJECT_REGION}-docker.pkg.dev/${CENTRAL_PROJECT_ID}/etl-pipeline-relationaldb-${ENVIRONMENT}/etl-pipeline-relationaldb:${IMAGE_TAG}"
+  CLUSTER_NAME: "etl-pipeline-cluster"
+  CLIENT_PROJECT_ID: "gcp_project_id"
+  CLIENT_NUMBER: "000000000000"
+  CLIENT_REGION: "us-central1"
+  CLIENT_TIMEZONE: "Asia/Kolkata"
+  SCHEDULAR_FREQ: "*/15 * * * *"
+  CRONJOB_TASK_PAYLOAD: '{"START_DATE": "", "END_DATE": "", "ETL_SOURCE": "MySQL", "WINDOW_DAYS": 1}'
+  HISTORIC_TASK_PAYLOAD: '{"START_DATE": "", "END_DATE": "", "ETL_SOURCE": "MySQL", "WINDOW_DAYS": 365}'
+  DOCKER_HOST: "tcp://docker:2375"
+  DOCKER_TLS_CERTDIR: ""
+
+build-and-push-image:
+  stage: build_staging
+  image: gcr.io/google.com/cloudsdktool/cloud-sdk:latest
+  services:
+    - docker:24.0.5-dind
+  
+  before_script:
+    - |
+      if [ -z "$CENTRAL_PROJECT_ID" ] && [ -z "$CENTRAL_SA_KEY" ] && [ -z "$CENTRAL_PROJECT_REGION" ]; then
+        echo "CRITICAL ERROR: One or more required variables (CENTRAL_PROJECT_ID, CENTRAL_SA_KEY, CENTRAL_PROJECT_REGION) are empty."
+        exit 1
+      fi
+    
+    - apt-get update && apt-get install -y docker.io
+    - echo "Authenticating with Google Cloud..."
+    - gcloud auth activate-service-account --key-file="$CENTRAL_SA_KEY"
+    - gcloud config set project "${CENTRAL_PROJECT_ID}"
+    - gcloud auth configure-docker "${CENTRAL_PROJECT_REGION}-docker.pkg.dev" --quiet
+
+  script:
+    - TIMESTAMP=$(date +%Y/%m/%d-%H:%M:%S)
+    - echo "Build process started at ${TIMESTAMP} for ${IMAGE_AR_PATH}"
+    - echo "Attempting to pull existing image for caching..."
+    - docker pull "${IMAGE_AR_PATH}" || true
+    - echo "Building the Docker image..."
+    - |
+      docker build \
+        --cache-from "${IMAGE_AR_PATH}" \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        -t "${IMAGE_AR_PATH}" .
+    
+    - echo "Pushing image to Artifact Registry..."
+    - |
+      if docker push "${IMAGE_AR_PATH}"; then
+        echo "=========================================================="
+        echo "SUCCESS: Staging image updated to ${IMAGE_TAG}"
+        echo "=========================================================="
+        FINAL_EXIT_CODE=0
+      else
+        echo "ERROR: Docker push failed. Check network or IAM permissions."
+        FINAL_EXIT_CODE=1
+      fi
+      exit $FINAL_EXIT_CODE
+
+  retry: 1
+  interruptible: false
+
+  only:
+    - staging
+  when: manual
+
+deploy_to_k8s:
+  stage: deploy_staging
+  needs: ["build-and-push-image"]
+  image: gcr.io/google.com/cloudsdktool/cloud-sdk:latest
+  before_script:
+    - apt-get update && apt-get install -y jq gettext-base
+    - gcloud auth activate-service-account --key-file="$CENTRAL_SA_KEY"
+
+  script:
+    - |
+      # 1. Initialize variables
+      STATUS="False"
+      LOG="Starting deployment process..."
+      FINAL_EXIT_CODE=1
+
+      # Allow script to continue on errors so we can catch them
+      set +e
+
+      echo "Configuring GKE access for ${CLIENT_PROJECT_ID}..."
+      gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone "${CLIENT_REGION}" --project "${CLIENT_PROJECT_ID}" > /dev/null 2>&1
+      
+      if [ $? -ne 0 ]; then
+          LOG="Deployment Failed: Could not connect to GKE cluster in project ${CLIENT_PROJECT_ID}."
+      else
+          echo "Generating manifests and applying to cluster..."
+          envsubst < k8s-pipelines/cronjob-data-sync-deploy-service.yml > temp-cronjob.yml
+          envsubst < k8s-pipelines/historic-data-deploy-service.yml > temp-historic.yml
+          
+          # Apply to Kubernetes
+          echo "Applying cronjob manifest..."
+          kubectl apply -f temp-cronjob.yml > /dev/null 2>&1
+          echo "Applying historic manifest..."
+          kubectl apply -f temp-historic.yml > /dev/null 2>&1
+          
+          if [ $? -eq 0 ]; then
+              STATUS="True"
+              LOG="Deployment Successful: ETL Jobs updated for client ${CLIENT_ID}."
+              FINAL_EXIT_CODE=0
+          else
+              LOG="Deployment Failed: Kubernetes rejected the manifest files."
+          fi
+      fi
+
+      # 3. Final Output for GitLab Logs/API
+      echo "=========================================================="
+      echo "STATUS: ${STATUS}"
+      echo "LOG: ${LOG}"
+      echo "=========================================================="
+      
+      # Exit with the actual result so the GitLab UI shows green or red
+      exit $FINAL_EXIT_CODE
+
+  retry: 1
+  interruptible: false
+  only:
+    - staging
+  when: manual
+
+  after_script:
+    - rm -f temp-cronjob.yml temp-historic.yml

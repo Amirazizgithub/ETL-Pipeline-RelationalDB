@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: etl-pipeline-relationaldb-historic-job-${CI_PIPELINE_ID}
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: default
+      nodeSelector:
+        # Ensure your cluster actually has a pool with this label!
+        cloud.google.com/gke-spot: "true"
+      containers:
+      - name: etl-pipeline-relationaldb-historic
+        image: "${IMAGE_AR_PATH}"
+        imagePullPolicy: Always
+        # This starts the file immediately
+        command: ["python", "-m", "routes.run_historic_job"]
+        env:
+          - name: CLIENT_NUMBER
+            value: "${CLIENT_NUMBER}"
+          - name: CLIENT_PROJECT_ID
+            value: "${CLIENT_PROJECT_ID}"
+          - name: CLIENT_REGION
+            value: "${CLIENT_REGION}"
+          - name: CLIENT_TIMEZONE
+            value: "${CLIENT_TIMEZONE}"
+          - name: CRONJOB_TASK_PAYLOAD
+            value: '${CRONJOB_TASK_PAYLOAD}'
+          - name: HISTORIC_TASK_PAYLOAD
+            value: '${HISTORIC_TASK_PAYLOAD}'
+          - name: DATABASE_HOST
+            value: "${DATABASE_HOST}"
+          - name: DATABASE_PORT
+            value: "${DATABASE_PORT}"
+          - name: DATABASE_USERNAME
+            value: "${DATABASE_USERNAME}"
+          - name: DATABASE_PASSWORD
+            value: "${DATABASE_PASSWORD}"
+          - name: DATABASE_NAME
+            value: "${DATABASE_NAME}"
+          - name: ETL_LOG_TABLE
+            value: "${ETL_LOG_TABLE}"
+        resources:
+          requests:
+            cpu: "1000m"
+            memory: "4Gi"
+          limits:
+            cpu: "3000m"
+            memory: "8Gi"
+      restartPolicy: Never

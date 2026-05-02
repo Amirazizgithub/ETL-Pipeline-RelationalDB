@@ -1,0 +1,79 @@
+# =====================================================================
+# Main GitLab CI Entry Point
+# =====================================================================
+
+stages:
+  - .pre
+  - check_format
+  # - api_test
+  - build_staging
+  - deploy_staging
+  - build_production
+  - deploy_production
+  - .post
+
+workflow:
+  name: "$PIPELINE_DISPLAY_NAME"
+  rules:
+    # 1. API/Trigger Logic (Production Client Deployment)
+    - if: '$CI_PIPELINE_SOURCE == "trigger" || $CI_PIPELINE_SOURCE == "api"'
+      variables:
+        PIPELINE_DISPLAY_NAME: "${TRIGGER_SOURCE}: ${CLIENT_NUMBER}"
+      when: always
+
+    # 2. Development: Runs when devs push OR when code is merged into development
+    - if: '$CI_COMMIT_BRANCH == "development"'
+      variables:
+        PIPELINE_DISPLAY_NAME: "DEV: format & jobs testing..."
+      when: always
+
+    # 3. UAT: Runs ONLY when Tech Lead merges code into UAT
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+      variables:
+        PIPELINE_DISPLAY_NAME: "STAG: staging testing..."
+      when: always
+
+    # 4. Main: Runs ONLY when code is merged into main
+    - if: '$CI_COMMIT_BRANCH == "production"'
+      variables:
+        PIPELINE_DISPLAY_NAME: "PROD: production docker image updating..."
+      when: always
+
+    # 5. Prevent pipelines from starting just because an MR was OPENED
+    # This keeps the UI clean until the merge actually happens.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+
+gitlab-api-ready:
+  stage: .pre
+  image: alpine:latest
+  script:
+    - echo "Pipeline Source -> ${CI_PIPELINE_SOURCE}"
+    - |
+      if [ "$TRIGGER_SOURCE" = "deploy_to_k8s" ]; then
+        echo "LOG: Production deployment initiated for Client: ${CLIENT_NUMBER}"
+        if [ -z "$CLIENT_NUMBER" ]; then echo "ERROR: CLIENT_NUMBER missing"; exit 1; fi
+      fi
+
+include:
+  - local: 'gitlab-pipelines/.gitlab-ci-prod.yml'
+    rules:
+      - if: '$TRIGGER_SOURCE == "deploy_to_k8s"'
+
+  - local: 'gitlab-pipelines/.gitlab-ci-dev.yml'
+    rules:
+      - if: '$TRIGGER_SOURCE'
+        when: never
+      - if: '$CI_COMMIT_BRANCH == "development"'
+
+  - local: 'gitlab-pipelines/.gitlab-ci-stag.yml'
+    rules:
+      - if: '$TRIGGER_SOURCE'
+        when: never
+      - if: '$CI_COMMIT_BRANCH == "staging"'
+
+  - local: 'gitlab-pipelines/.gitlab-ci-update.yml'
+    rules:
+      - if: '$TRIGGER_SOURCE'
+        when: never
+      - if: '$CI_COMMIT_BRANCH == "production"'

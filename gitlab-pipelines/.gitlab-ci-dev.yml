@@ -1,0 +1,31 @@
+# ========================================================================
+# cicd-pipelines/.gitlab-ci-dev.yml 
+# this pipeline is for development environment for format and api testing
+# ========================================================================
+
+black-format-check:
+  stage: check_format
+  image: python:3.12-slim
+  script:
+    - echo "Running format check..."
+    - pip install black
+    - black --check --verbose .
+
+  retry: 1
+  interruptible: false
+  only:
+    - development
+
+# pytest-api-tests:
+#   stage: api_test
+#   image: python:3.12-slim
+#   needs: ["black-format-check"]
+#   script:
+#     - echo "Running API tests..."
+#     - pip install --no-cache-dir -r requirements.txt
+#     - pytest -v tests/test_jobs.py
+
+#   retry: 1
+#   interruptible: false
+#   only:
+#     - development
